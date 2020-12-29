@@ -1,0 +1,513 @@
+<script type="text/javascript" src="/client/js/sizeof.js"></script>
+<link rel="stylesheet" href="/client/styles.css">
+<h2> viruswars.io super alpha edition... dont judge the webpage styling please </h2>
+<div id="game">
+  <p id="blue-username" style="color:blue;"></p>
+  <canvas id="ctx" width="500" height="500" style="border:1px solid black;"></canvas>
+  <p id="red-username" style="color:red;"></p>
+</div>
+
+<div id="login">
+  <h1> Enter your username below </h1>
+  <p> and press enter when you're done </p>
+  <form id="login-form">
+    <input id="username-input" type="text" style="width:500px"></input>
+    <p id="username-error" style="color:red;"></p>
+  </form>
+  <marquee style="width:1000px" behavior="scroll" direction="left" scrollamount="40"><h1 class='comicsans rainbow'> INSTRUCTIONS!!! </h1></marquee>
+  <p> - Drag your mouse and select your viruses </p>
+  <p> - Click on a point on the map after you select them to move them! </p>
+  <p> - Move them to a cell (denoted as an "O") to infect it. It costs 100 viruses </p>
+  <p> - Prevent your opponent from infecting cells by infecting the cells with your viruses </p>
+  <p> - Once your cell is infected, it will generate 1 virus/sec unless someone else claims it from you</p>
+  <h4> Good luck! </h4>
+</div>
+<div id="waiting">
+  <p>waiting for users...</p>
+</div>
+<div id="selected" style="color:green;"></div>
+<br><div id="debug"></div>
+<br><div id="debug2"></div>
+
+<script src="https://cdn.socket.io/socket.io-1.4.5.js"></script>
+<script>
+  var FRAMERATE = 30;
+  var VIRUS_SPEED = 17; //editing this will mess up the client, not the server lol
+  var mouse_status = false;
+  var socket = io();
+  var game;
+  var start = false;
+  var selected_viruses = [];
+  var selected_cells = [];
+  var red = 0;
+  var blue = 0;
+  var Game = function(data){
+    var self = {
+      cells:data.cells,
+      viruses:data.viruses,
+      to_display:data.viruses,
+      cells_to_display:[],
+      my_color:data.my_color,
+      blue_user:data.blue_user,
+      red_user:data.red_user,
+    };
+    return self;
+  };
+
+  /*function updateGame(data){
+    for(d in data.destroyed_ids){
+      for(v in game.viruses){
+        if(game.viruses[v].id == data.destroyed_ids[d]){
+          game.viruses.splice(v,1);
+          break;
+        }
+      }
+    }
+    for(v in data.edited_viruses){
+      var found = false;
+      for(g in game.viruses){
+        if(data.edited_viruses[v].id == game.viruses[g].id){
+          found = true;
+          game.viruses[g] = data.edited_viruses[v];
+          break;
+        }
+      }
+      if(!found){
+        game.viruses.push(data.edited_viruses[v]);
+      }
+    };
+    game.cells = [];
+    for(c in data.edited_cells){
+      game.cells.push(data.edited_cells[c]);
+    }
+    for(c in selected_cells){
+      if(selected_cells[c].timer > 0){
+        selected_cells[c].timer -= 1;
+      }else{
+        selected_cells.splice(c,1);
+      }
+    }
+  }*/
+  function updateGame(gamer){
+    for(v in gamer.viruses){
+      if(gamer.viruses[v].mlx != -1){
+        var slope = (gamer.viruses[v].mly - gamer.viruses[v].y)/(gamer.viruses[v].mlx - gamer.viruses[v].x);
+        if(gamer.viruses[v].mlx >= gamer.viruses[v].x){
+          gamer.viruses[v].x += VIRUS_SPEED/(FRAMERATE*Math.sqrt(1+slope*slope));
+          gamer.viruses[v].y += slope * VIRUS_SPEED/(FRAMERATE*Math.sqrt(1+slope*slope));
+        }else{
+          gamer.viruses[v].x -= VIRUS_SPEED/(FRAMERATE*Math.sqrt(1+slope*slope));
+          gamer.viruses[v].y -= slope * VIRUS_SPEED/(FRAMERATE*Math.sqrt(1+slope*slope));
+        }
+        if(Math.abs(gamer.viruses[v].mlx - gamer.viruses[v].x) < 2 && Math.abs(gamer.viruses[v].mly - gamer.viruses[v].y) < 2){
+          gamer.viruses[v].mlx = -1;
+        }
+      }
+    }
+    return gamer;
+  }
+
+  function debugDisplay(data){
+    //document.getElementById('debug').innerHTML = JSON.stringify(data);
+  }
+  function debugDisplayTwo(str, data){
+    //document.getElementById('debug2').innerHTML += "<br>" + str + ": " + JSON.stringify(data);
+  }
+  var SelectRectangle = function(x1,y1,x2,y2){
+    var self = {
+      x1:x1,
+      y1:y1,
+      x2:x2,
+      y2:y2,
+      show:false,
+    };
+    return self;
+  };
+
+  var select_box = SelectRectangle(0,0,0,0);
+  var ctx = document.getElementById('ctx').getContext('2d');
+  document.getElementById('game').style.display = "none"
+  document.getElementById('waiting').style.display = "none";
+  var username_input = document.getElementById('username-input');
+  var username_error = document.getElementById('username-error');
+  var login_form = document.getElementById("login-form");
+  ctx.font = '30px Arial';
+
+  socket.on('updateWaitingUsers',function(data){
+    document.getElementById('waiting').innerHTML = "<p>waiting for users...</p>";
+    for(var i = 0 ; i < data.length; i++)
+      document.getElementById('waiting').innerHTML = document.getElementById('waiting').innerHTML + "<p>" + data[i] + "</p>";
+  });
+
+  socket.on('tf',function(data){
+    game.to_display = {};
+    for(v in game.viruses){
+      if(data.includes(game.viruses[v].id)){
+        game.to_display[v] = game.viruses[v];
+      }
+    }
+    for(c in game.cells){
+      if(data.includes(game.cells[c].id)){
+        var includes = 0;
+        for(cc in game.cells_to_display){
+          if(game.cells_to_display[cc].id == game.cells[c].id){
+            includes = cc;
+          }
+        }
+        if(includes == 0){
+          game.cells_to_display.push(Object.assign({},game.cells[c]));
+        }else{
+          game.cells_to_display[includes] = Object.assign({},game.cells[c]);
+        }
+        }
+      }
+    //debugDisplay(data.length);
+  });
+
+  socket.on('fullGameUpdate',function(data){
+    start = true;
+    game = Game(data);
+    document.getElementById('game').style.display = "block";
+    if(game.my_color == "blue"){
+      document.getElementById('blue-username').innerHTML = "You: " + data.blue_user + ": " + blue + "/800 viruses";
+      document.getElementById('red-username').innerHTML = "Opp: " + data.red_user + ": " + red + "/800 viruses";
+    }else{
+      document.getElementById('blue-username').innerHTML = "Opp: " + data.blue_user + ": " + blue + "/800 viruses";
+      document.getElementById('red-username').innerHTML = "You: " + data.red_user + ": " + red + "/800 viruses";
+    }
+    document.getElementById('waiting').style.display = "none";
+    drawGame();
+    //document.getElementById('debug').innerHTML = Math.floor(sizeof(data)/1000 + sizeof(document.getElementById('debug2'))/1000) + " kbps";
+    //document.getElementById("debug2").innerHTML = "";
+  });
+
+  socket.on('vc',function(data){
+  //  debugDisplay(game);
+    red = data.red;
+    blue = data.blue;
+    if(game.my_color == "blue"){
+      document.getElementById('blue-username').innerHTML = "You: " + game.blue_user + ": " + blue + "/800 viruses";
+      document.getElementById('red-username').innerHTML = "Opp: " + game.red_user + ": " + red + "/800 viruses";
+    }else{
+      document.getElementById('blue-username').innerHTML = "Opp: " + game.blue_user + ": " + blue + "/800 viruses";
+      document.getElementById('red-username').innerHTML = "You: " + game.red_user + ": " + red + "/800 viruses";
+    }
+  });
+
+  socket.on('opponent_disconnected',function(){
+    alert('your opponent disconnected :(')
+    location.reload(true);
+  });
+//  socket.on('updateGame',function(data){
+//    document.getElementById('debug').innerHTML = sizeof(data)*30 + " bytes/second";
+//    document.getElementById('debug2').innerHTML = "Number of viruses: " + game.viruses.length;
+//    clearCanvas();
+//    updateGame(data);
+//    drawGame();
+//    drawSelectBox();
+//  });
+  socket.on('edit_virus',function(data){
+    for(d in data){
+      game.viruses[data[d].id].mlx = data[d].mlx;
+      game.viruses[data[d].id].mly = data[d].mly;
+      debugDisplayTwo('edit_virus',data);
+    }
+  });
+
+  socket.on('destroy_virus',function(data){
+    for(d in data){
+      delete game.viruses[data[d]];
+      debugDisplayTwo('destroy_virus',data);
+    }
+  });
+
+  socket.on('stop_virus',function(data){
+    for(d in data){
+      try{
+        game.viruses[data[d].id].mlx = data[d].x;
+        game.viruses[data[d].id].mly = data[d].y;
+      }catch(err){
+        //debugDisplay(data[d]);
+      }
+    }
+  });
+
+  socket.on('create_virus',function(data){
+    for(d in data){
+      game.viruses[data[d].id] = data[d];
+      debugDisplayTwo('create_virus',data);
+    }
+  });
+
+  socket.on('edit_cell',function(data){
+    for(d in data){
+      for(c in game.cells){
+        if(game.cells[c].id == data[d].id){
+          game.cells[c].claim = data[d].claim;
+          game.cells[c].hp = data[d].hp;
+          break;
+        }
+      }
+    }
+    debugDisplayTwo('edit_cell',data);
+  });
+
+  socket.on('win',function(){
+    alert('YOU WIN!');
+    location.reload(true);
+  });
+
+  socket.on('lose',function(){
+    alert('you lose... F in the chat bois');
+    location.reload(true);
+  });
+
+  socket.on('nf',function(virus){
+    if(start){
+      clearCanvas();
+      game = updateGame(game);
+      if(virus.edit){
+        if(Math.abs(virus.x - virus.move_loc_x) >= Math.abs(virus.y - virus.move_loc_y)){
+          if(virus.x > virus.move_loc_x){
+            if(game.viruses[virus.id].x > virus.x + 3 && FRAMERATE > 15){
+              FRAMERATE *= .97;
+            }
+            if(game.viruses[virus.id].x < virus.x - 3 && FRAMERATE < 60){
+              FRAMERATE /= .97;
+            }
+          }
+          if(virus.x < virus.move_loc_x){
+            if(game.viruses[virus.id].x > virus.x + 3 && FRAMERATE < 60){
+              FRAMERATE /= .97;
+            }
+            if(game.viruses[virus.id].x < virus.x - 3 && FRAMERATE > 15){
+              FRAMERATE *= .97;
+            }
+          }
+        }else{
+          if(virus.y > virus.move_loc_y){
+            if(game.viruses[virus.id].y > virus.y + 3 && FRAMERATE > 15){
+              FRAMERATE *= .97;
+            }
+            if(game.viruses[virus.id].y < virus.y - 3 && FRAMERATE < 60){
+              FRAMERATE /= .97;
+            }
+          }
+          if(virus.y < virus.move_loc_y){
+            if(game.viruses[virus.id].y > virus.y + 3 && FRAMERATE < 60){
+              FRAMERATE /= .97;
+            }
+            if(game.viruses[virus.id].y < virus.y - 3 && FRAMERATE > 15){
+              FRAMERATE *= .97;
+            }
+          }
+          if(FRAMERATE > 60 || FRAMERATE < 15){
+            socket.emit('help');
+            FRAMERATE = 30;
+          }
+        }
+      }
+      //document.getElementById('debug').innerHTML = FRAMERATE;
+        //else{
+        //FRAMERATE = 30;
+      //}
+      drawGame();
+      drawSelectBox();
+      for(c in selected_cells){
+        if(selected_cells[c].timer > 0){
+          selected_cells[c].timer -= 1;
+        }else{
+          selected_cells.splice(c,1);
+        }
+      }
+    //  document.getElementById('debug3').innerHTML = JSON.stringify(game);
+    }
+  });
+
+  login_form.onsubmit = function(e){
+    e.preventDefault();
+    socket.emit('sendUsername',username_input.value);
+    //alert("username sent: " + username_input.value);
+    document.getElementById('waiting').style.display = "block";
+    document.getElementById('login').style.display = "none";
+  }
+
+const canvas = document.getElementById('ctx');
+canvas.addEventListener('mousedown', function(e) {
+  const rect = canvas.getBoundingClientRect();
+  var x = e.clientX - rect.left;
+  var y = e.clientY - rect.top;
+  if(selected_viruses.length == 0){
+    select_box.show = true;
+    select_box.x1 = x;
+    select_box.y1 = y;
+    select_box.x2 = x;
+    select_box.y2 = y;
+    mouse_status = true;
+    document.getElementById('selected').innerHTML = "";
+  }else{
+    document.getElementById('selected').innerHTML = "Number of selected viruses: " + selected_viruses.length;
+    mouse_status = false;
+    var pack = {
+      virus_ids:selected_viruses,
+      move_to:true,
+      move_cell:false,
+      move_loc_x:x,
+      move_loc_y:y,
+      move_cell_id:0,
+    }
+    for(c in game.cells){
+      if(game.cells[c].x - 20 < pack.move_loc_x && game.cells[c].x + 20 > pack.move_loc_x && game.cells[c].y + 20 > pack.move_loc_y && game.cells[c].y - 20 < pack.move_loc_y){
+        pack.move_to = false;
+        pack.move_cell = true;
+        pack.move_cell_id = game.cells[c].id;
+        selected_cells.push({cell:game.cells[c],timer:10});
+        break;
+      }
+    }
+    socket.emit('command',pack);
+    document.getElementById('selected').innerHTML = "";
+    selected_viruses = [];
+  };
+});
+
+canvas.addEventListener('mouseup', function(e) {
+  if(mouse_status){
+    mouse_status = false;
+    const rect = canvas.getBoundingClientRect();
+    var x = e.clientX - rect.left;
+    var y = e.clientY - rect.top;
+    select_box.x2 = x;
+    select_box.y2 = y;
+    select_box.show = false;
+    selected_viruses = [];
+    var xg = select_box.x2;
+    var xl = select_box.x1;
+    if(select_box.x1 > select_box.x2){
+      xg = select_box.x1;
+      xl = select_box.x2;
+    }
+    var yg = select_box.y2;
+    var yl = select_box.y1;
+    if(select_box.y1 > select_box.y2){
+      yg = select_box.y1;
+      yl = select_box.y2;
+    }
+    for(v in game.viruses){
+      if(game.my_color == game.viruses[v].color && game.viruses[v].x > xl && game.viruses[v].x < xg && game.viruses[v].y > yl && game.viruses[v].y < yg){
+        selected_viruses.push(game.viruses[v].id);
+      }
+    }
+    document.getElementById('selected').innerHTML = "Number of selected viruses: " + selected_viruses.length;
+  }
+});
+
+canvas.addEventListener('mousemove', function(e) {
+  if(select_box.show){
+    const rect = canvas.getBoundingClientRect();
+    var x = e.clientX - rect.left;
+    var y = e.clientY - rect.top;
+    select_box.x2 = x;
+    select_box.y2 = y;
+  }
+});
+
+function drawSelectBox(){
+  if(select_box.show){
+    ctx.strokeStyle = game.my_color;
+    ctx.beginPath();
+    ctx.moveTo(select_box.x1, select_box.y1);
+    ctx.lineTo(select_box.x1, select_box.y2);
+    ctx.lineTo(select_box.x2, select_box.y2);
+    ctx.lineTo(select_box.x2, select_box.y1);
+    ctx.lineTo(select_box.x1, select_box.y1);
+    ctx.stroke();
+  }
+}
+
+function drawGame(){
+  debugDisplay(game.cells);
+  ctx.fillStyle = "black";
+  ctx.fillRect(0,0,500,500);
+  ctx.stroke();
+  for(virus in game.to_display){
+    if(game.to_display[virus].color == game.my_color){
+      ctx.beginPath();
+      var ysmol = game.to_display[virus].y-95;
+      var ybig = game.to_display[virus].y+95;
+      var xsmol = game.to_display[virus].x-95;
+      var xbig = game.to_display[virus].x+95;
+      if(game.to_display[virus].x < 95){
+        xsmol = 0;
+      }else if(game.to_display[virus].x > 405){
+        xbig = 500;
+      }
+      if(game.to_display[virus].y < 95){
+        ysmol = 0;
+      }else if(game.to_display[virus].y > 405){
+        ybig = 500;
+      }
+      ctx.beginPath();
+      //ctx.fillStyle = "orange";
+    //  ctx.fillRect(xsmol-30,ysmol,xbig-xsmol+60,ybig-ysmol);
+    //  ctx.fillRect(xsmol,ysmol-30,xbig-xsmol,ybig-ysmol+60);
+    //  ctx.fill();
+    //  ctx.strokeStyle = "orange";
+    //  ctx.stroke();
+    //  ctx.beginPath();
+      ctx.strokeStyle = "white";
+      ctx.fillStyle = "white";
+      ctx.arc(game.to_display[virus].x,game.to_display[virus].y,100,0,2*Math.PI);
+      //ctx.fillRect(xsmol,ysmol,xbig-xsmol,ybig-ysmol);
+      ctx.fill();
+      ctx.stroke();
+    }
+  }
+  for(virus in game.to_display){
+    ctx.font = '8px Arial';
+    ctx.fillStyle = "black";
+    try{
+      if(game.viruses[virus].color == "red")
+        ctx.fillStyle = "red";
+      if(game.viruses[virus].color == "blue")
+        ctx.fillStyle = "blue";
+      if(selected_viruses.includes(game.to_display[virus].id))
+        ctx.fillStyle = "green";
+      ctx.fillText("X",Math.floor(game.to_display[virus].x)-4,Math.floor(game.to_display[virus].y)+4);
+    }catch(err){
+
+    }
+  }
+  for(cell in game.cells_to_display){
+    ctx.font = '30px Arial';
+    ctx.fillStyle = "black";
+    if(game.cells_to_display[cell].claim == "unclaimed")
+      ctx.fillStyle = "purple";
+    if(game.cells_to_display[cell].claim == "red")
+      ctx.fillStyle = "red";
+    if(game.cells_to_display[cell].claim == "blue")
+      ctx.fillStyle = "blue";
+    if(game.cells_to_display[cell].claim == "blueing")
+      ctx.fillStyle = "#7EBBEA";
+    if(game.cells_to_display[cell].claim == "reding")
+      ctx.fillStyle = "#F3887C";
+    if(selected_cells.length > 0){
+      if(selected_cells[0].cell.id == game.cells_to_display[cell].id){
+        ctx.fillStyle = "green";
+      }
+    }
+    ctx.fillText("O",game.cells_to_display[cell].x-15,game.cells_to_display[cell].y+15);
+    ctx.font = '10px Arial';
+    ctx.fillText(game.cells_to_display[cell].hp,game.cells_to_display[cell].x-5,game.cells_to_display[cell].y+5);
+  }
+}
+
+setInterval(function(){
+  //socket.emit('help');
+},2000);
+function clearCanvas(){
+  ctx.clearRect(0,0,500,500);
+}
+
+
+</script>
